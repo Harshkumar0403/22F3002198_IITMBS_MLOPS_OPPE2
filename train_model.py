@@ -27,7 +27,7 @@ DATA_PATH = "data/data.csv"
 MODEL_PATH = "models/model.pkl"
 ARTIFACT_DIR = "mlflow_artifacts"
 
-MLFLOW_TRACKING_URI = "http://136.115.41.149:8100"
+MLFLOW_TRACKING_URI = "http://34.71.85.176:8100"
 EXPERIMENT_NAME = "heart_disease_logistic_regression"
 
 RANDOM_STATE = 42
