@@ -1,0 +1,198 @@
+name: MLOps Pipeline – Heart Disease Prediction
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: phonic-axle-473506-u8
+  REGION: us-central1
+  ARTIFACT_REPO: heart-disease-repo
+  IMAGE_NAME: heart-disease-api
+  GKE_CLUSTER: heart-disease-cluster
+  GKE_ZONE: us-south1-a
+  GCS_BUCKET: mlops_oppe2
+
+jobs:
+  build-train-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # =====================================================
+      # CHECKOUT
+      # =====================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # =====================================================
+      # PYTHON SETUP
+      # =====================================================
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # =====================================================
+      # GCP AUTH (JSON KEY FROM SECRET)
+      # =====================================================
+      - name: Authenticate to GCP
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > gcp-key.json
+          python -m json.tool gcp-key.json > /dev/null
+          sudo apt-get update && sudo apt-get install -y google-cloud-cli
+          gcloud auth activate-service-account --key-file=gcp-key.json
+          gcloud config set project $PROJECT_ID
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcp-key.json" >> $GITHUB_ENV
+
+      # =====================================================
+      # INPUT DRIFT CHECK
+      # =====================================================
+      - name: Input Drift Check
+        run: |
+          source .venv/bin/activate
+          echo "## Input Drift Check" > report.md
+          python check_drift.py >> report.md
+
+      # =====================================================
+      # TRAIN MODEL (MLFLOW)
+      # =====================================================
+      - name: Train Model
+        env:
+          MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+        run: |
+          source .venv/bin/activate
+          python train_model.py
+
+      # =====================================================
+      # BUILD & PUSH DOCKER IMAGE
+      # =====================================================
+      - name: Build & Push Docker Image
+        env:
+          IMAGE_URI: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+          docker build -t $IMAGE_URI:latest .
+          SHA=$(git rev-parse --short HEAD)
+          docker tag $IMAGE_URI:latest $IMAGE_URI:$SHA
+          docker push $IMAGE_URI:latest
+          docker push $IMAGE_URI:$SHA
+          echo "IMAGE_SHA=$IMAGE_URI:$SHA" >> $GITHUB_ENV
+
+      # =====================================================
+      # INSTALL GKE AUTH PLUGIN
+      # =====================================================
+      - name: Install GKE auth plugin
+        run: |
+          echo "🔧 Setting up Google Cloud APT repository..."
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
+          curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+          echo "🔧 Installing gke-gcloud-auth-plugin..."
+          sudo apt-get update
+          sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+          echo "✅ gke-gcloud-auth-plugin installed."
+
+      # =====================================================
+      # CONNECT TO GKE
+      # =====================================================
+      - name: Configure kubectl
+        run: |
+          gcloud container clusters get-credentials \
+            $GKE_CLUSTER \
+            --zone $GKE_ZONE \
+            --project $PROJECT_ID
+
+      # =====================================================
+      # DEPLOY TO GKE
+      # =====================================================
+      - name: Deploy to GKE
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/hpa.yaml || true
+          kubectl set image deployment/heart-disease-api \
+            heart-disease-container=$IMAGE_SHA
+          kubectl rollout status deployment/heart-disease-api --timeout=180s
+
+      # =====================================================
+      # WAIT FOR EXTERNAL IP
+      # =====================================================
+      - name: Get Service External IP
+        id: svc_ip
+        run: |
+          for i in {1..30}; do
+            IP=$(kubectl get svc heart-disease-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+            if [ -n "$IP" ]; then
+              echo "EXTERNAL_IP=$IP" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      # =====================================================
+      # SMOKE TEST
+      # =====================================================
+      - name: Smoke Test
+        run: |
+          IP=${{ steps.svc_ip.outputs.EXTERNAL_IP }}
+          echo "## Smoke Test" >> report.md
+          curl -X POST "http://$IP/predict" \
+            -H "Content-Type: application/json" \
+            -d '{"sno":0,"age":45,"gender":1,"cp":1,"trestbps":130,"chol":250,"fbs":0,"restecg":1,"thalach":150,"exang":0,"oldpeak":1.2,"slope":1,"ca":0,"thal":2}' >> report.md
+
+      # =====================================================
+      # PER-SAMPLE TEST (100 ROWS)
+      # =====================================================
+      - name: Run test_model.py (100 samples)
+        run: |
+          source .venv/bin/activate
+          IP=${{ steps.svc_ip.outputs.EXTERNAL_IP }}
+          python test_model.py --endpoint http://$IP/predict
+          echo "## Per-sample Prediction Results" >> report.md
+          tail -n 20 result.csv >> report.md
+
+      # =====================================================
+      # UPLOAD REPORT
+      # =====================================================
+      - name: Upload pipeline report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlops-report
+          path: |
+            report.md
+            result.csv
+            mlflow.db
+    # -----------------------------
+      # CML REPORT (OPTIONAL)
+      # -----------------------------
+      - name: Setup CML
+        uses: iterative/setup-cml@v2
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post CML Report
+    #if: ${{ secrets.CML_REPO_TOKEN != '' }}
+        env:
+          REPO_TOKEN: ${{ secrets.CML_REPO_TOKEN }}
+        run: |
+          echo "### Automated MLOps Report" > cml_report.md
+          echo "Model + Deployment completed successfully." >> cml_report.md
+          cml comment create cml_report.md
