@@ -1,0 +1,26 @@
+Explainability Analysis: False Negatives (Heart Disease Not Predicted)
+
+Definition:
+False negatives are patients who actually have heart disease (target = 1)
+but were predicted by the model as not having heart disease (prediction = 0).
+
+Key Findings:
+The SHAP analysis shows that the model’s incorrect decisions for these patients
+are most strongly influenced by the following factors:
+
+1. thalach
+2. sno
+3. trestbps
+4. age
+5. chol
+
+Interpretation:
+For false negative patients, these features tend to have values that make
+the model interpret them as low-risk, even though they truly have heart disease.
+In particular, lower ST depression, fewer major vessels, favorable chest pain
+types, or higher exercise tolerance can mask the underlying disease.
+
+Clinical Implication:
+These results suggest that patients with mild or atypical symptoms may be
+systematically under-predicted by the model, indicating a need for threshold
+adjustment or cost-sensitive training to reduce false negatives.
