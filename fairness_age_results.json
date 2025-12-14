@@ -1,0 +1,20 @@
+{
+  "sensitive_attribute": "age",
+  "age_bucket_size": "20 years",
+  "group_metrics": {
+    "accuracy": {
+      "20-39": 1.0,
+      "40-59": 0.9898477157360406,
+      "60-79": 0.9666666666666667
+    },
+    "selection_rate": {
+      "20-39": 0.75,
+      "40-59": 0.5939086294416244,
+      "60-79": 0.4111111111111111
+    }
+  },
+  "fairness_metrics": {
+    "demographic_parity_difference": 0.3388888888888889,
+    "demographic_parity_ratio": 0.5481481481481482
+  }
+}
